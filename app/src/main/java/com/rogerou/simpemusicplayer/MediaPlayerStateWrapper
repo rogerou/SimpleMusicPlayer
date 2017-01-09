@@ -1,0 +1,226 @@
+package com.opencom.dgc.channel.fm;
+
+import android.media.AudioManager;
+import android.media.MediaPlayer;
+import android.media.MediaPlayer.OnBufferingUpdateListener;
+import android.media.MediaPlayer.OnCompletionListener;
+import android.media.MediaPlayer.OnErrorListener;
+import android.media.MediaPlayer.OnInfoListener;
+import android.media.MediaPlayer.OnPreparedListener;
+import android.util.Log;
+
+import java.io.IOException;
+import java.util.EnumSet;
+
+/**
+ * Created by Seven on 2016/11/10
+ * A wrapper class for {@link MediaPlayer}.
+ * use in  {@link FMPlayer}
+ * <p>
+ * 一个封装好MediaPlayer状态的类
+ */
+public class MediaPlayerStateWrapper {
+
+    private static String tag = "MediaPlayerWrapper";
+    private MediaPlayer mPlayer;
+    private State currentState;
+    private StateListener mStateListener;
+    private int bufferPercent;
+
+    MediaPlayerStateWrapper(StateListener stateListener) {
+        mStateListener = stateListener;
+        mPlayer = new MediaPlayer();
+        currentState = State.IDLE;
+        mPlayer.setOnPreparedListener(mOnPreparedListener);
+        mPlayer.setOnCompletionListener(mOnCompletionListener);
+        mPlayer.setOnBufferingUpdateListener(mOnBufferingUpdateListener);
+        mPlayer.setOnErrorListener(mOnErrorListener);
+        mPlayer.setOnInfoListener(mOnInfoListener);
+    }
+
+    /* METHOD WRAPPING FOR STATE CHANGES */
+    public enum State {
+        IDLE, ERROR, INITIALIZED, PREPARING, PREPARED, STARTED, STOPPED, PLAYBACK_COMPLETE, PAUSED;
+    }
+
+    public void setDataSource(String path) {
+        if (currentState == State.IDLE) {
+            try {
+                mPlayer.setAudioStreamType(AudioManager.STREAM_MUSIC);
+                mPlayer.setDataSource(path);
+                currentState = State.INITIALIZED;
+                mStateListener.onInitialized();
+            } catch (IllegalArgumentException | IllegalStateException | IOException e) {
+                e.printStackTrace();
+            }
+        } else throw new RuntimeException();
+    }
+
+    public void prepareAsync() {
+        Log.d(tag, "prepareAsync()");
+        if (EnumSet.of(State.INITIALIZED, State.STOPPED).contains(currentState)) {
+            mPlayer.prepareAsync();
+            currentState = State.PREPARING;
+            mStateListener.onPreParing();
+        } else throw new RuntimeException();
+    }
+
+    public boolean isPlaying() {
+        Log.d(tag, "isPlaying()");
+        return currentState != State.ERROR && mPlayer.isPlaying();
+    }
+
+    public void seekTo(int msec) {
+        Log.d(tag, "seekTo()");
+        if (EnumSet.of(State.PREPARED, State.STARTED, State.PAUSED, State.PLAYBACK_COMPLETE).contains(currentState)) {
+            mPlayer.seekTo(msec);
+        } else throw new RuntimeException();
+    }
+
+    public void pause() {
+        Log.d(tag, "pause()");
+        if (EnumSet.of(State.STARTED, State.PAUSED).contains(currentState)) {
+            mPlayer.pause();
+            currentState = State.PAUSED;
+            mStateListener.onPaused();
+        } else throw new RuntimeException();
+    }
+
+    public void start() {
+        Log.d(tag, "start()");
+        if (EnumSet.of(State.PREPARED, State.STARTED, State.PAUSED, State.PLAYBACK_COMPLETE).contains(currentState)) {
+            currentState = State.PREPARED;
+            mPlayer.start();
+            mStateListener.onStarted();
+            currentState = State.STARTED;
+        } else throw new RuntimeException();
+    }
+
+    public void stop() {
+        Log.d(tag, "stop()");
+        if (EnumSet.of(State.PREPARED, State.STARTED, State.STOPPED, State.PAUSED, State.PLAYBACK_COMPLETE).contains(
+                currentState)) {
+            mPlayer.stop();
+            currentState = State.STOPPED;
+            mStateListener.onStopped();
+        } else throw new RuntimeException();
+    }
+
+    public void reset() {
+        Log.d(tag, "reset()");
+        mPlayer.reset();
+        currentState = State.IDLE;
+        mStateListener.onReset();
+    }
+
+    /**
+     * @return The current state of the mediaplayer state machine.
+     */
+    public State getState() {
+        Log.d(tag, "getState()");
+        return currentState;
+    }
+
+    public void release() {
+        Log.d(tag, "release()");
+        mPlayer.release();
+    }
+
+    /* INTERNAL LISTENERS */
+    private OnPreparedListener mOnPreparedListener = new OnPreparedListener() {
+
+        @Override
+        public void onPrepared(MediaPlayer mp) {
+            Log.d(tag, "on prepared");
+            currentState = State.PREPARED;
+            mPlayer.start();
+            currentState = State.STARTED;
+            mStateListener.onStarted();
+        }
+    };
+    private OnCompletionListener mOnCompletionListener = new OnCompletionListener() {
+        @Override
+        public void onCompletion(MediaPlayer mp) {
+            Log.d(tag, "on completion");
+            currentState = State.PLAYBACK_COMPLETE;
+            mStateListener.onCompleted();
+        }
+    };
+    private OnBufferingUpdateListener mOnBufferingUpdateListener = new OnBufferingUpdateListener() {
+        @Override
+        public void onBufferingUpdate(MediaPlayer mp, int percent) {
+            Log.d(tag, "on buffering update");
+            bufferPercent = percent;
+        }
+    };
+    private OnErrorListener mOnErrorListener = new OnErrorListener() {
+
+        @Override
+        public boolean onError(MediaPlayer mp, int what, int extra) {
+            Log.d(tag, "on error");
+            currentState = State.ERROR;
+            mStateListener.onError();
+            return true;
+        }
+    };
+    private OnInfoListener mOnInfoListener = new OnInfoListener() {
+
+        @Override
+        public boolean onInfo(MediaPlayer mp, int what, int extra) {
+            Log.d(tag, "on info");
+            return false;
+        }
+    };
+
+
+    public int getBufferPercent() {
+        return bufferPercent;
+    }
+
+    /* OTHER STUFF */
+    public int getCurrentPosition() {
+        if (currentState != State.ERROR) {
+            return mPlayer.getCurrentPosition();
+        } else {
+            return 0;
+        }
+    }
+
+    public int getDuration() {
+        // Prepared, Started, Paused, Stopped, PlaybackCompleted
+        if (EnumSet.of(State.PREPARED, State.STARTED, State.PAUSED, State.STOPPED, State.PLAYBACK_COMPLETE).contains(
+                currentState)) {
+            return mPlayer.getDuration();
+        } else {
+            return 100;
+        }
+    }
+
+    public void setVolumn(float left, float right) {
+        if (EnumSet.of(State.PREPARED, State.STARTED, State.PAUSED, State.STOPPED, State.PLAYBACK_COMPLETE).contains(
+                currentState)) {
+            mPlayer.setVolume(left, right);
+        }
+    }
+
+    public interface StateListener {
+
+        void onInitialized();
+
+        void onPreParing();
+
+        void onStarted();
+
+        void onPaused();
+
+        void onStopped();
+
+        void onCompleted();
+
+        void onError();
+
+        void onReset();
+
+    }
+
+}
