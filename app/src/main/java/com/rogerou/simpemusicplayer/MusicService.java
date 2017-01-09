@@ -1,4 +1,4 @@
-package com.rogerou.simpemusicplayer;
+package com.opencom.dgc.channel.fm;
 
 
 import android.app.Service;
@@ -11,15 +11,23 @@ import android.os.IBinder;
 import android.support.annotation.Nullable;
 import android.widget.Toast;
 
+import com.opencom.dgc.MainActivity;
+import com.opencom.dgc.entity.Song;
+import com.opencom.dgc.util.NetStatusUtil;
+import com.waychel.tools.utils.LogUtils;
+
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.List;
 
+import ibuger.lbbs.LbbsPostViewActivity;
+
 /**
- * Created by Roger on 2016/7/12.
+ * Created by Seven on 2016/7/12.
  * <p/>
  * 后台音乐播放的Service
  */
-public class MusicService extends Service {
+public class MusicService extends Service implements FMPlayer.PlayerCallBack {
 
     public static final String ACTION_PLAY_SINGLE = "ACTION_PLAY_SINGLE";
     public static final String ACTION_PLAY_ALL_SONGS = "ACTION_PLAY_ALL_SONGS";
@@ -31,22 +39,29 @@ public class MusicService extends Service {
     public static final String ACTION_PREV_SONG = "ACTION_PREV_SONG";
     public static final String ACTION_PAUSE_SONG = "ACTION_PAUSE_SONG";
     public static final String ACTION_ADD_QUEUE = "ACTION_ADD_QUEUE";
-
+    public static final String ACTION_ADD_LIST_QUEUE = "ACTION_ADD_LIST_QUEUE";
+    public static final String ACTION_STOP = "ACTION_STOP";
+    public static final String ACTION_DESTROY = "ACTION_DESTROY";
+    public static final String ACTION_CLICK = "FM_CLICK";
+    public static final String ACTION_REFRESH_LIST = "ACTION_REFRESH_LIST";
 
     private AudioManager mAudioManager;
 
     private FMPlayer mPlayer;
 
-    private MusicNotificationManager mNotificationManager;
+    private FMNotificationManager mNotificationManager;
 
 
     private BroadcastReceiver mBroadcastReceiver = new BroadcastReceiver() {
         @Override
         public void onReceive(Context context, Intent intent) {
             try {
-                handleBrocastReceived(context, intent);
+                handleBroadcastReceived(context, intent);
+
+
             } catch (Exception e) {
-                Toast.makeText(MusicService.this, "音乐播放出错啦", Toast.LENGTH_SHORT).show();
+                e.printStackTrace();
+                LogUtils.e("FMService", e);
             }
         }
     };
@@ -61,7 +76,7 @@ public class MusicService extends Service {
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
         if (mPlayer == null) {
-            mPlayer = new FMPlayer(MusicService.this, this);
+            mPlayer = new FMPlayer(this, this);
         }
         IntentFilter intentfilter = new IntentFilter();
         intentfilter.addAction(ACTION_PLAY_SINGLE);
@@ -74,10 +89,16 @@ public class MusicService extends Service {
         intentfilter.addAction(ACTION_NOTI_CLICK);
         intentfilter.addAction(ACTION_NOTI_REMOVE);
         intentfilter.addAction(ACTION_ADD_QUEUE);
+        intentfilter.addAction(ACTION_ADD_LIST_QUEUE);
+        intentfilter.addAction(ACTION_STOP);
+        intentfilter.addAction(ACTION_DESTROY);
+        intentfilter.addAction(ACTION_CLICK);
+        intentfilter.addAction(ACTION_REFRESH_LIST);
         registerReceiver(mBroadcastReceiver, intentfilter);
-        mNotificationManager = new MusicNotificationManager(MusicService.this, this);
+        mNotificationManager = new FMNotificationManager(MusicService.this, this);
         mNotificationManager.setNotificationPlayer(false);
-        return START_STICKY;
+        LogUtils.e("开启service");
+        return START_NOT_STICKY;
     }
 
 
@@ -88,39 +109,58 @@ public class MusicService extends Service {
     }
 
 
-    private void handleBrocastReceived(Context context, Intent intent) throws IOException {
+    private void handleBroadcastReceived(Context context, Intent intent) throws IOException {
         if (requestAudio() != AudioManager.AUDIOFOCUS_REQUEST_GRANTED) {
             Toast.makeText(context, "获取音乐焦点失败", Toast.LENGTH_SHORT).show();
             return;
         }
+
         switch (intent.getAction()) {
             case ACTION_PLAY_SINGLE:
                 Song s = intent.getParcelableExtra("song");
                 mPlayer.playSingleSong(s);
-                updatePlayerAndNotification(PlayControlFragment.PLAYING, s);
+//                updatePlayerAndNotification(s, true);
+                if (NetStatusUtil.getNetStatus(this).equals("2G/3G")) {
+                    Toast.makeText(this, "当前网络为移动网络！", Toast.LENGTH_LONG).show();
+                }
                 break;
             case ACTION_PLAY_ALL_SONGS:
                 List<Song> songList = intent.getParcelableArrayListExtra("songList");
+                if (songList == null || songList.isEmpty() || mPlayer.getCurrentPlayingSongs().containsAll(songList)) {
+                    return;
+                }
                 int startPos = intent.getIntExtra("pos", 0);
                 mPlayer.playListSongs(songList, startPos);
-                updatePlayerAndNotification(PlayControlFragment.PLAYING, songList.get(startPos));
+                updatePlayerAndNotification(songList.get(startPos), true);
+                if (NetStatusUtil.getNetStatus(this).equals("2G/3G")) {
+                    Toast.makeText(this, "当前网络为移动网络！", Toast.LENGTH_LONG).show();
+                }
                 break;
             case ACTION_NEXT_SONG:
-                mPlayer.playNextSong(mPlayer.getCurrentPlayingPos() + 1);
+                mPlayer.playNextSong(mPlayer.getCurrentPlayingPos() + 1, mPlayer.isPlaying());
                 break;
             case ACTION_PREV_SONG:
                 mPlayer.playPrevSong(mPlayer.getCurrentPlayingPos() - 1);
-                updatePlayerAndNotification(PlayControlFragment.PLAYING, mPlayer.getCurrentPlayingSong());
                 break;
             case ACTION_PAUSE_SONG:
-                mPlayer.playOrStop(mNotificationManager);
-                updatePlayerAndNotification(mPlayer.getMediaPlayer().isPlaying() ? PlayControlFragment.PLAYING : PlayControlFragment.PAUSE, mPlayer.getCurrentPlayingSong());
+                if (mPlayer.getCurrentPlayingSong() == null) {
+                    return;
+                }
+                if (!mPlayer.isPlaying()) {
+                    mPlayer.checkBuffer();
+                    mPlayer.SendToTopic();
+                } else {
+                    mPlayer.stopChecking();
+                    mPlayer.stopPushing();
+                }
+                updatePlayerAndNotification(mPlayer.getCurrentPlayingSong(), !mPlayer.isPlaying());
+                mPlayer.playOrStop();
                 break;
             case ACTION_SEEK_SONG:
-                mPlayer.seek(intent.getIntExtra("seek", 0));
+                mPlayer.seek(intent.getLongExtra("seek", 0));
                 break;
             case ACTION_CHANGE_SONG:
-                mPlayer.playNextSong(intent.getIntExtra("pos", 0));
+                mPlayer.playNextSong(intent.getIntExtra("pos", 0), true);
                 break;
             case ACTION_NOTI_CLICK:
                 final Intent i = new Intent();
@@ -131,27 +171,60 @@ public class MusicService extends Service {
                 startActivity(i);
                 break;
             case ACTION_NOTI_REMOVE:
-                mNotificationManager.setNotifyActive(false);
-                mPlayer.getMediaPlayer().stop();
+//                mNotificationManager.setNotifyActive(false);
+//                mPlayer.getMediaPlayer().stop();
                 break;
             case ACTION_ADD_QUEUE:
                 Song song = intent.getParcelableExtra("song");
                 mPlayer.addSongToQueue(song);
                 break;
+            case ACTION_ADD_LIST_QUEUE:
+                List<Song> songs = intent.getParcelableArrayListExtra("songList");
+                mPlayer.addSonsListToQueue(songs);
+                break;
+
+            case ACTION_STOP:
+                mPlayer.stopPlayer();
+                break;
+
+            case ACTION_DESTROY:
+                stop();
+                break;
+
+            case ACTION_CLICK:
+                toTopic(context);
+                break;
+            case ACTION_REFRESH_LIST:
+                ArrayList<Song> newSongs = intent.getParcelableArrayListExtra("songList");
+                mPlayer.setPlayList(newSongs);
+                break;
         }
 
     }
 
-    public void updatePlayerAndNotification(@PlayControlFragment.STATE String action, Song song) {
+    private void toTopic(Context context) {
+        Intent intent = new Intent(context, LbbsPostViewActivity.class);
+        intent.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
+        intent.putExtra("kind_id", mPlayer.getCurrentPlayingSong().getKind_id());
+        intent.putExtra("post_id", mPlayer.getCurrentPlaySong().getPost_id());
+        context.startActivity(intent);
+    }
+
+
+    public void updatePlayerAndNotification(Song song, boolean isPlaying) {
+        if (song == null) {
+            return;
+        }
         Intent i = new Intent();
+        @PlayControlFragment.STATE
+        String action = isPlaying ? PlayControlFragment.PLAYING : PlayControlFragment.PAUSE;
         i.setAction(action);
         i.putExtra("song", song);
         sendBroadcast(i);
         if (mNotificationManager.isNotifyActive()) {
             mNotificationManager.setNotifyActive(false);
         }
-        mNotificationManager.changeNotificationDetails(song.getSong_name(), song.getAuthor_name(), song.getSong_album(), mPlayer.getMediaPlayer().isPlaying());
-
+        mNotificationManager.changeNotificationDetails(song.getSong_name(), song.getAuthor_name(), song.getSong_album(), isPlaying);
     }
 
 
@@ -170,7 +243,7 @@ public class MusicService extends Service {
             switch (focusChange) {
                 case AudioManager.AUDIOFOCUS_LOSS_TRANSIENT:
 //                    Log.e("长时间失去焦点");
-                    mPlayer.stopPlayer();
+                    mPlayer.setVolumn(0.0f, 0.0f);
                     break;
 
                 case AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK:
@@ -181,14 +254,15 @@ public class MusicService extends Service {
                 case AudioManager.AUDIOFOCUS_GAIN:
 //                    LogUtils.e("获得焦点");
                     mPlayer.setVolumn(1.0f, 1.0f);
-
                     break;
 
                 case AudioManager.AUDIOFOCUS_LOSS:
+                    Song song = mPlayer.getCurrentPlayingSong();
+                    if (song != null)
+                        updatePlayerAndNotification(song, false);
+                    mPlayer.stopPushing();
 //                    LogUtils.e("失去焦点");
-                    mPlayer.stopPlayer();
                     break;
-
                 default:
 //                    LogUtils.e("focusChanged" + focusChange);
                     break;
@@ -203,6 +277,22 @@ public class MusicService extends Service {
         unregisterReceiver(mBroadcastReceiver);
     }
 
+    private void stop() {
+        Intent i = new Intent(PlayControlFragment.PAUSE);
+        i.putExtra("song", mPlayer.getCurrentPlayingSong());
+        sendBroadcast(i);
+        stopForeground(true);
+        if (mPlayer != null) {
+            mPlayer.resetState();
+        }
+
+        if (mNotificationManager != null) {
+            mNotificationManager.setNotifyActive(false);
+            mNotificationManager.setNotificationPlayer(true);
+            mNotificationManager.remove();
+        }
+    }
+
 
     public int requestAudio() {
         return mAudioManager.requestAudioFocus(mOnAudioFocusChangeListener, AudioManager.STREAM_MUSIC, AudioManager.AUDIOFOCUS_GAIN);
@@ -212,6 +302,7 @@ public class MusicService extends Service {
 //        if (mAudioFocus != AudioManager.AUDIOFOCUS_GAIN) {
 //            int result = mAudioManager.requestAudioFocus(mOnAudioFocusChangeListener, AudioManager.STREAM_MUSIC,
 //                    AudioManager.AUDIOFOCUS_GAIN);
+
 //            if (result == AudioManager.AUDIOFOCUS_REQUEST_GRANTED) {
 //                mAudioFocus = AudioManager.AUDIOFOCUS_GAIN;
 //            }
@@ -227,28 +318,6 @@ public class MusicService extends Service {
 //        }
 //    }
 
-//    private void createMediaPlayerIfNeeded() {
-//        LogUtils.e("createMediaPlayerIfNeeded. needed? ");
-//        if (mMediaPlayer == null) {
-//            mMediaPlayer = new MediaPlayer();
-//
-//            mMediaPlayer.setWakeMode(getApplicationContext(),
-//                    PowerManager.PARTIAL_WAKE_LOCK);
-//            mMediaPlayer.setOnPreparedListener(this);
-//            mMediaPlayer.setOnCompletionListener(this);
-//            mMediaPlayer.setOnErrorListener(this);
-//            mMediaPlayer.setOnSeekCompleteListener(this);
-//        } else {
-//            mMediaPlayer.reset();
-//        }
-//    }
-//
-//    private void relaxResources(boolean releaseMediaPlayer) {
-//        if (releaseMediaPlayer && mMediaPlayer != null) {
-//            mMediaPlayer.reset();
-//            mMediaPlayer.release();
-//            mMediaPlayer = null;
-//        }
-//    }
 
 }
+
