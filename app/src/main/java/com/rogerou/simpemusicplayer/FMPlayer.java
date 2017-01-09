@@ -1,111 +1,105 @@
-package com.rogerou.simpemusicplayer;
+package com.opencom.dgc.channel.fm;
 
 import android.content.Context;
-import android.media.MediaPlayer;
+import android.content.Intent;
 import android.widget.Toast;
+
+import com.opencom.dgc.entity.Song;
 
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.TimeUnit;
+
+import rx.Observable;
+import rx.Subscription;
+import rx.functions.Action1;
+
+import static com.opencom.dgc.channel.fm.FmPostDetailView.ACTION_AUDIO_PROGRESS_CALLBACK;
+import static com.opencom.dgc.channel.fm.FmPostDetailView.AUDIO_IS_CACHING;
 
 /**
  * Created by Seven on 2016/7/13.
  * <p
- * 播放器
+ * 播放Fm和音乐
  */
-public class FMPlayer implements MediaPlayer.OnBufferingUpdateListener {
+public class FMPlayer implements MediaPlayerStateWrapper.StateListener {
     private Context context;
-    private MusicService service;
-    private MediaPlayer mediaPlayer;
+    private PlayerCallBack mPlayerCallBack;
     private ArrayList<Song> currentPlayingSongs;
-    private int currentPlayingPos = -1;
-    int bufferPercent;
+    private int currentPlayingPos;
+    private MediaPlayerStateWrapper mWrapper;
+    private Subscription mSubscription;
 
-    public FMPlayer(Context context, MusicService service) {
+    private Subscription mCheckBufferSub;
+
+    public FMPlayer(Context context, PlayerCallBack service) {
         this.context = context;
-        this.service = service;
-        this.mediaPlayer = new MediaPlayer();
+        this.mPlayerCallBack = service;
         currentPlayingSongs = new ArrayList<>();
-        mediaPlayer.setOnBufferingUpdateListener(this);
+        mWrapper = new MediaPlayerStateWrapper(this);
     }
-
-//    public void playAlbumSongs(long albumId) throws IOException {
-//        playAlbumSongs(albumId, 0);
-//    }
 
     public void playListSongs(List<Song> songList, final int startSongPos) throws IOException {
         currentPlayingSongs.clear();
         currentPlayingSongs.addAll(songList);
-        stopPlayer();
-        mediaPlayer.reset();
-        mediaPlayer.setDataSource(currentPlayingSongs.get(startSongPos).getUrl());
-        mediaPlayer.prepare();
-        mediaPlayer.start();
+        resetState();
+        mWrapper.setDataSource(currentPlayingSongs.get(startSongPos).getUrl());
+        mWrapper.prepareAsync();
         setPlayingPos(startSongPos);
-        mediaPlayer.setOnCompletionListener(new MediaPlayer.OnCompletionListener() {
-            @Override
-            public void onCompletion(MediaPlayer mediaPlayer) {
-                try {
-                    playNextSong(startSongPos + 1);
-                } catch (IOException e) {
-                    e.printStackTrace();
-                    Toast.makeText(context, "播放音乐出错",
-                            Toast.LENGTH_SHORT).show();
-                }
-            }
-        });
     }
 
-    public void setCurrentPlayingSongs(Song currentPlayingSong) {
-        ArrayList<Song> newSongsList = new ArrayList<>();
-        newSongsList.add(currentPlayingSong);
-        setCurrentPlayingSongs(newSongsList);
+    public void setCurrentPlayingSong(Song currentPlayingSong) {
+        currentPlayingSongs.clear();
+        currentPlayingSongs.add(currentPlayingSong);
     }
 
     public void stopPlayer() {
-        setPlayingPos(-1);
-        if (mediaPlayer != null) {
-            mediaPlayer.stop();
-        }
+        if (mWrapper.isPlaying())
+            mWrapper.stop();
     }
 
 
-//    public void playPlaylist(int id, final int currentPlayingPos) throws IOException {
-//        stopPlayer();
-//        setCurrentPlayingSongs(dbHelper.getAllPlaylistSongs(id));
-//        configurePlayer(currentPlayingPos);
-//    }
-
-//    public void playArtistSongs(String name, int pos) throws IOException {
-//        stopPlayer();
-//        ArrayList<Song> songs = ListSongs.getSongsListOfArtist(context, name);
-//        setCurrentPlayingSongs(songs);
-//        configurePlayer(pos);
-//    }
-
-//    public void playAllSongs(long songId) throws IOException {
-//        stopPlayer();
-//        setCurrentPlayingSongs(ListSongs.getSongList(context));
-//        final int songToPlayPos = findForASongInArrayList(songId);
-//        configurePlayer(songToPlayPos);
-//    }
-
-    public void playOrStop(MusicNotificationManager notifactionHandler) {
-//        boolean state;
-        if (mediaPlayer.isPlaying()) {
-            mediaPlayer.pause();
-//            state = false;
-            service.stopForeground(false);
-            notifactionHandler.setNotificationPlayer(true);
-        } else {
-            mediaPlayer.start();
-//            state = true;
-            notifactionHandler.setNotificationPlayer(false);
+    public void setPlayList(ArrayList<Song> list) {
+        resetState();
+        if (list == null || list.isEmpty()) {
+            return;
         }
-//        notifactionHandler.updateNotificationView();
-//        notifactionHandler.changeNotificationDetails(getCurrentPlayingSong().getName(),
-//                getCurrentPlayingSong().getArtist(), getCurrentPlayingSong().getAlbumId(), state);
+        this.currentPlayingSongs = list;
+        Song song = list.get(0);
+        setPlayingPos(0);
+        mPlayerCallBack.updatePlayerAndNotification(song, false);
     }
+
+
+    public void playOrStop() {
+        Song song = getCurrentPlayingSong();
+        if (song == null) {
+            return;
+        }
+        switch (mWrapper.getState()) {
+            case IDLE:
+                mWrapper.setDataSource(song.getUrl());
+                mWrapper.prepareAsync();
+                break;
+
+            case INITIALIZED:
+                mWrapper.prepareAsync();
+                break;
+
+            case PREPARING:
+                resetState();
+                break;
+            default:
+                if (mWrapper.isPlaying()) {
+                    mWrapper.pause();
+                } else {
+                    mWrapper.start();
+                }
+                break;
+        }
+    }
+
 
     public int getNextSongPosition(int currentPos) {
         if (currentPos == currentPlayingSongs.size() - 1) {
@@ -117,84 +111,69 @@ public class FMPlayer implements MediaPlayer.OnBufferingUpdateListener {
         }
     }
 
-    public void configurePlayer(final int pos) throws IOException {
-        stopPlayer();
-        setPlayingPos(pos);
-        mediaPlayer.reset();
-        mediaPlayer.setDataSource(currentPlayingSongs
-                .get(pos).getUrl());
-        mediaPlayer.prepare();
-        mediaPlayer.start();
-        mediaPlayer.setOnCompletionListener(new MediaPlayer.OnCompletionListener() {
-            @Override
-            public void onCompletion(MediaPlayer mediaPlayer) {
-                try {
-                    playNextSong(getNextSongPosition(pos));
-                } catch (IOException e) {
-                    e.printStackTrace();
-                }
-            }
-        });
-    }
 
-    public void playNextSong(final int nextSongPos) throws IOException {
+    public void playNextSong(int nextSongPos, boolean isAutoPlay) throws IOException {
         if (nextSongPos < currentPlayingSongs.size()) {
-            //If there is some song available play it or repeat is enabled.
-            configurePlayer(nextSongPos);
+            configurePlayer(nextSongPos, isAutoPlay);
         } else {
-            configurePlayer(0);
+            configurePlayer(0, isAutoPlay);
         }
-        service.updatePlayerAndNotification(PlayControlFragment.PLAYING, currentPlayingSongs.get(currentPlayingPos));
     }
 
     public void playPrevSong(final int prevSongPos) throws IOException {
-        if ((mediaPlayer.getCurrentPosition() / 1000) <= 2) {
-            int position;
-         /*   if (prevSongPos == -1 && preferenceHandler.isRepeatAllEnabled()) {
-                //If song pos is more than 0
-                position = getCurrentPlayingSongs().size() - 1;
-            } else */
-            if (prevSongPos == -1) {
-                position = 0;
-            } else {
-                position = prevSongPos;
-            }
-            final int pos = position;
-            stopPlayer();
-            setPlayingPos(pos);
-            mediaPlayer.reset();
-            mediaPlayer.setDataSource(currentPlayingSongs.get(pos).getUrl());
-            mediaPlayer.prepare();
-            mediaPlayer.start();
-            mediaPlayer.setOnCompletionListener(new MediaPlayer.OnCompletionListener() {
-                @Override
-                public void onCompletion(MediaPlayer mediaPlayer) {
-                    try {
-                        playNextSong(getNextSongPosition(prevSongPos));
-                    } catch (IOException e) {
-                        e.printStackTrace();
-                        Toast.makeText(context, "播放音乐失败",
-                                Toast.LENGTH_SHORT).show();
-                    }
-                }
-            });
+        int position;
+
+        if (prevSongPos <= 0) {
+            position = 0;
         } else {
-            mediaPlayer.seekTo(0);
+            position = prevSongPos;
+        }
+        final int pos = position;
+        configurePlayer(pos, mWrapper.isPlaying());
+    }
+
+    void resetState() {
+        if (mWrapper.getState() != MediaPlayerStateWrapper.State.IDLE) {
+            stopChecking();
+            stopPushing();
+            stopPlayer();
+            mWrapper.reset();
         }
     }
 
 
-    public void playSingleSong(Song song) throws IOException {
-        setPlayingPos(0);
-        stopPlayer();
-        mediaPlayer.reset();
-        mediaPlayer.setDataSource(song.getUrl());
-        mediaPlayer.prepare();
-        setCurrentPlayingSongs(song);
-        mediaPlayer.start();
+    public void configurePlayer(int pos, boolean isAutoPlay) throws IOException {
+        Song song = currentPlayingSongs.get(pos);
+        setPlayingPos(pos);
+        resetState();
+        mWrapper.setDataSource(song.getUrl());
+        if (isAutoPlay) {
+            mWrapper.prepareAsync();
+            mPlayerCallBack.updatePlayerAndNotification(getCurrentPlayingSong(), true);
+        } else {
+            mPlayerCallBack.updatePlayerAndNotification(getCurrentPlayingSong(), false);
+        }
     }
 
-    public void setPlayingPos(int pos) {
+    public void playSingleSong(Song song) throws IOException {
+        if (song == null || song.getUrl() == null) {
+            return;
+        }
+        Song currentSong = getCurrentPlayingSong();
+        //当前播放的歌曲一样
+        if (currentSong != null && song.equals(currentSong) && mWrapper.isPlaying()) {
+            return;
+        }
+        if (getCurrentPlayingSongs().contains(song)) {
+            int pos = getCurrentPlayingSongs().indexOf(song);
+            configurePlayer(pos, true);
+        } else {
+            setCurrentPlayingSong(song);
+            configurePlayer(0, true);
+        }
+    }
+
+    public synchronized void setPlayingPos(int pos) {
         currentPlayingPos = pos;
     }
 
@@ -209,51 +188,201 @@ public class FMPlayer implements MediaPlayer.OnBufferingUpdateListener {
         return currentPlayingSongs;
     }
 
-    public void setCurrentPlayingSongs(ArrayList<Song> currentPlayingSongs) {
+    public void setCurrentPlayingSong(ArrayList<Song> currentPlayingSongs) {
         this.currentPlayingSongs.clear();
         this.currentPlayingSongs = currentPlayingSongs;
     }
 
     public Song getCurrentPlayingSong() {
+        if (currentPlayingSongs.size() == 0) {
+            return null;
+        }
         return currentPlayingSongs.get(currentPlayingPos);
     }
 
-    public MediaPlayer getMediaPlayer() {
-        return mediaPlayer;
-    }
-
-    public Song getSongFromId(final long id) {
-        Song song = null;
-        for (Song song1 : currentPlayingSongs) {
-            if (song1.getSongId() == id) {
-                song = song1;
+    public Song getSongFromId(long id) {
+        for (Song song : currentPlayingSongs) {
+            if (song.getSongId() == id) {
+                return song;
             }
         }
-        return song;
+        return null;
     }
 
     public int getCurrentPlayingPos() {
         return currentPlayingPos;
     }
 
-    public void seek(int seek) {
-        mediaPlayer.seekTo(seek);
+    public void seek(long seek) {
+        int duration = mWrapper.getDuration();
+        int seekBuffer = getBufferPercent() / 100 * duration;
+        if (seek <= duration && seek <= seekBuffer) {
+            mWrapper.seekTo((int) seek);
+        }
     }
 
     public void addSongToQueue(Song s) {
         currentPlayingSongs.add(s);
     }
 
+    public void addSonsListToQueue(List<Song> songList) {
+        currentPlayingSongs.addAll(songList);
+    }
+
     public void setVolumn(float left, float riht) {
-        if (mediaPlayer != null) {
-            mediaPlayer.setVolume(left, riht);
+        if (mWrapper != null) {
+            mWrapper.setVolumn(left, riht);
         }
     }
 
+    public int getBufferPercent() {
+        return mWrapper.getBufferPercent();
+    }
+
+    public int getSongPosition() {
+        return mWrapper.getCurrentPosition();
+    }
+
+    public int getSongDuration() {
+        return mWrapper.getDuration();
+    }
+
+    public boolean isPlaying() {
+        return mWrapper.isPlaying();
+    }
+
+    public void SendToTopic() {
+        if (mSubscription == null || mSubscription.isUnsubscribed()) {
+            mSubscription = Observable.interval(1000, TimeUnit.MILLISECONDS)
+                    .subscribe(new Action1<Long>() {
+                        @Override
+                        public void call(Long aLong) {
+                            Intent intent = new Intent(ACTION_AUDIO_PROGRESS_CALLBACK);
+                            intent.putExtra(FmPostDetailView.AUDIO_CACHE_PROGRESS, getBufferPercent());
+                            if (isPlaying()) {
+                                int position = getSongPosition();
+                                intent.putExtra(FmPostDetailView.AUDIO_PLAY_PROGRESS, position < 0 ? (int) aLong.longValue() * 1000 : position);
+                            }
+                            intent.putExtra(FmPostDetailView.AUDIO_PLAY_TIME, getSongDuration());
+                            context.sendBroadcast(intent);
+                        }
+                    });
+        }
+
+    }
+
+    //控制缓冲与播放进度的关系，防止坑爹服务器的流导致播放卡顿
+    void checkBuffer() {
+        if (mCheckBufferSub == null || mCheckBufferSub.isUnsubscribed()) {
+            mCheckBufferSub = Observable.interval(1000, TimeUnit.MILLISECONDS)
+                    .subscribe(new Action1<Long>() {
+                        @Override
+                        public void call(Long aLong) {
+                            if (getBufferPercent() < 100) {
+                                if (getBufferPercent() <= 25) {
+                                    if (isPlaying()) {
+                                        mWrapper.pause();
+                                        sendCachingBroadcast(true);
+                                    }
+
+                                } else {
+                                    int phasePercent = (getBufferPercent() - (getSongPosition() / getSongDuration()));
+                                    if (phasePercent > 10 && mSubscription != null && !mSubscription.isUnsubscribed()) {
+                                        if (mWrapper.getState() == MediaPlayerStateWrapper.State.PAUSED) {
+                                            mWrapper.start();
+                                            sendCachingBroadcast(false);
+                                        }
+                                    } else {
+                                        if (isPlaying()) {
+                                            mWrapper.pause();
+                                            sendCachingBroadcast(true);
+                                        }
+                                    }
+                                }
+                            } else {
+                                if (mWrapper.getState() == MediaPlayerStateWrapper.State.PAUSED && mSubscription != null && !mSubscription.isUnsubscribed()) {
+                                    mWrapper.start();
+                                    sendCachingBroadcast(false);
+                                } else {
+                                    stopChecking();
+                                }
+                            }
+                        }
+                    });
+        }
+
+    }
+
+    private void sendCachingBroadcast(boolean isCaching) {
+        Intent intent = new Intent(AUDIO_IS_CACHING);
+        intent.putExtra("Caching", isCaching);
+        context.sendBroadcast(intent);
+    }
+
+
+    void stopPushing() {
+        if (mSubscription != null && !mSubscription.isUnsubscribed()) {
+            mSubscription.unsubscribe();
+        }
+    }
+
+    void stopChecking() {
+        if (mCheckBufferSub != null && !mCheckBufferSub.isUnsubscribed()) {
+            sendCachingBroadcast(false);
+            mCheckBufferSub.unsubscribe();
+        }
+    }
 
     @Override
-    public void onBufferingUpdate(MediaPlayer mp, int percent) {
-        bufferPercent = percent;
+    public void onInitialized() {
     }
-    
+
+    @Override
+    public void onPreParing() {
+        SendToTopic();
+    }
+
+    @Override
+    public void onStarted() {
+        checkBuffer();
+    }
+
+    @Override
+    public void onPaused() {
+
+    }
+
+    @Override
+    public void onStopped() {
+        mPlayerCallBack.updatePlayerAndNotification(getCurrentPlayingSong(), false);
+    }
+
+    @Override
+    public void onCompleted() {
+        try {
+            stopPushing();
+            playNextSong(getCurrentPlayingPos() + 1, true);
+        } catch (IOException e) {
+            e.printStackTrace();
+            Toast.makeText(context, "播放音乐出错",
+                    Toast.LENGTH_SHORT).show();
+        }
+    }
+
+    @Override
+    public void onError() {
+        mPlayerCallBack.updatePlayerAndNotification(getCurrentPlayingSong(), false);
+        stopPushing();
+        resetState();
+    }
+
+    @Override
+    public void onReset() {
+        mPlayerCallBack.updatePlayerAndNotification(getCurrentPlayingSong(), false);
+    }
+
+
+    interface PlayerCallBack {
+        void updatePlayerAndNotification(Song song, boolean isPlaying);
+    }
 }
