@@ -4,9 +4,10 @@ import android.content.Context;
 import android.content.Intent;
 import android.widget.Toast;
 
-import com.opencom.dgc.entity.Song;
+import com.opencom.db.bean.Song;
 
 import java.io.IOException;
+import java.lang.ref.SoftReference;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
@@ -23,35 +24,35 @@ import static com.opencom.dgc.channel.fm.FmPostDetailView.AUDIO_IS_CACHING;
  * <p
  * 播放Fm和音乐
  */
-public class FMPlayer implements MediaPlayerStateWrapper.StateListener {
-    private Context context;
+public class PlayerController implements MediaPlayerStateWrapper.StateListener {
+    private SoftReference<Context> mContext;
     private PlayerCallBack mPlayerCallBack;
-    private ArrayList<Song> currentPlayingSongs;
-    private int currentPlayingPos;
+    private ArrayList<Song> mCurrentPlayingSongs;
+    private volatile int currentPlayingPos;
     private MediaPlayerStateWrapper mWrapper;
     private Subscription mSubscription;
-
     private Subscription mCheckBufferSub;
+    private boolean isBuffing;
 
-    public FMPlayer(Context context, PlayerCallBack service) {
-        this.context = context;
+    public PlayerController(Context context, PlayerCallBack service) {
+        this.mContext = new SoftReference<>(context);
         this.mPlayerCallBack = service;
-        currentPlayingSongs = new ArrayList<>();
+        mCurrentPlayingSongs = new ArrayList<>();
         mWrapper = new MediaPlayerStateWrapper(this);
     }
 
-    public void playListSongs(List<Song> songList, final int startSongPos) throws IOException {
-        currentPlayingSongs.clear();
-        currentPlayingSongs.addAll(songList);
+    public void playListSongs(List<Song> SongList, final int startSongPos) throws IOException {
+        mCurrentPlayingSongs.clear();
+        mCurrentPlayingSongs.addAll(SongList);
         resetState();
-        mWrapper.setDataSource(currentPlayingSongs.get(startSongPos).getUrl());
+        mWrapper.setDataSource(mCurrentPlayingSongs.get(startSongPos).getUrl());
         mWrapper.prepareAsync();
         setPlayingPos(startSongPos);
     }
 
     public void setCurrentPlayingSong(Song currentPlayingSong) {
-        currentPlayingSongs.clear();
-        currentPlayingSongs.add(currentPlayingSong);
+        mCurrentPlayingSongs.clear();
+        mCurrentPlayingSongs.add(currentPlayingSong);
     }
 
     public void stopPlayer() {
@@ -65,21 +66,27 @@ public class FMPlayer implements MediaPlayerStateWrapper.StateListener {
         if (list == null || list.isEmpty()) {
             return;
         }
-        this.currentPlayingSongs = list;
-        Song song = list.get(0);
+        this.mCurrentPlayingSongs = list;
+        Song Song = list.get(0);
         setPlayingPos(0);
-        mPlayerCallBack.updatePlayerAndNotification(song, false);
+        mPlayerCallBack.updatePlayerAndNotification(Song, false);
     }
 
 
     public void playOrStop() {
-        Song song = getCurrentPlayingSong();
-        if (song == null) {
+        Song Song = getCurrentPlayingSong();
+        if (Song == null) {
             return;
+        }
+        if (!isPlaying()) {
+            checkBuffer();
+        } else {
+            stopChecking();
         }
         switch (mWrapper.getState()) {
             case IDLE:
-                mWrapper.setDataSource(song.getUrl());
+                String url = mPlayerCallBack.getProxyUrl(Song.getSong_id());
+                mWrapper.setDataSource(url);
                 mWrapper.prepareAsync();
                 break;
 
@@ -94,7 +101,12 @@ public class FMPlayer implements MediaPlayerStateWrapper.StateListener {
                 if (mWrapper.isPlaying()) {
                     mWrapper.pause();
                 } else {
-                    mWrapper.start();
+                    if (!isBuffing) {
+                        mWrapper.start();
+                    } else {
+                        resetState();
+                    }
+
                 }
                 break;
         }
@@ -102,7 +114,7 @@ public class FMPlayer implements MediaPlayerStateWrapper.StateListener {
 
 
     public int getNextSongPosition(int currentPos) {
-        if (currentPos == currentPlayingSongs.size() - 1) {
+        if (currentPos == mCurrentPlayingSongs.size() - 1) {
             //跳到第一首
             return 0;
         } else {
@@ -113,7 +125,7 @@ public class FMPlayer implements MediaPlayerStateWrapper.StateListener {
 
 
     public void playNextSong(int nextSongPos, boolean isAutoPlay) throws IOException {
-        if (nextSongPos < currentPlayingSongs.size()) {
+        if (nextSongPos < mCurrentPlayingSongs.size()) {
             configurePlayer(nextSongPos, isAutoPlay);
         } else {
             configurePlayer(0, isAutoPlay);
@@ -132,48 +144,58 @@ public class FMPlayer implements MediaPlayerStateWrapper.StateListener {
         configurePlayer(pos, mWrapper.isPlaying());
     }
 
-    void resetState() {
+    public void resetState() {
         if (mWrapper.getState() != MediaPlayerStateWrapper.State.IDLE) {
+            sendCachingBroadcast(false);
             stopChecking();
             stopPushing();
+            mPlayerCallBack.stopCurrentConnection();
             stopPlayer();
             mWrapper.reset();
         }
     }
 
-
-    public void configurePlayer(int pos, boolean isAutoPlay) throws IOException {
-        Song song = currentPlayingSongs.get(pos);
-        setPlayingPos(pos);
-        resetState();
-        mWrapper.setDataSource(song.getUrl());
-        if (isAutoPlay) {
-            mWrapper.prepareAsync();
-            mPlayerCallBack.updatePlayerAndNotification(getCurrentPlayingSong(), true);
-        } else {
-            mPlayerCallBack.updatePlayerAndNotification(getCurrentPlayingSong(), false);
-        }
+    public MediaPlayerStateWrapper.State getCurrentState() {
+        return mWrapper.getState();
     }
 
-    public void playSingleSong(Song song) throws IOException {
-        if (song == null || song.getUrl() == null) {
+
+    public void configurePlayer(int pos, boolean isAutoPlay) throws IOException {
+        Song Song = mCurrentPlayingSongs.get(pos);
+        setPlayingPos(pos);
+        resetState();
+        String url = mPlayerCallBack.getProxyUrl(Song.getSong_id());
+        mWrapper.setDataSource(url);
+        if (isAutoPlay) {
+            mWrapper.prepareAsync();
+        }
+        mPlayerCallBack.updatePlayerAndNotification(getCurrentPlayingSong(), isAutoPlay);
+    }
+
+    public void playSingleSong(Song Song) throws IOException {
+        if (Song == null || Song.getUrl() == null) {
             return;
         }
         Song currentSong = getCurrentPlayingSong();
-        //当前播放的歌曲一样
-        if (currentSong != null && song.equals(currentSong) && mWrapper.isPlaying()) {
+
+        if (isBuffing) {
+            sendCachingBroadcast(true);
             return;
         }
-        if (getCurrentPlayingSongs().contains(song)) {
-            int pos = getCurrentPlayingSongs().indexOf(song);
+        //当前播放的歌曲一样
+        if (currentSong != null && Song.equals(currentSong) && isPlaying()) {
+            return;
+        }
+        if (getCurrentPlayingSongs().contains(Song)) {
+            int pos = getCurrentPlayingSongs().indexOf(Song);
             configurePlayer(pos, true);
         } else {
-            setCurrentPlayingSong(song);
-            configurePlayer(0, true);
+            mCurrentPlayingSongs.add(Song);
+            configurePlayer(mCurrentPlayingSongs.size() - 1, true);
         }
     }
 
-    public synchronized void setPlayingPos(int pos) {
+    public void setPlayingPos(int pos) {
         currentPlayingPos = pos;
     }
 
@@ -181,29 +203,29 @@ public class FMPlayer implements MediaPlayerStateWrapper.StateListener {
         if (currentPlayingPos == -1) {
             return null;
         }
-        return currentPlayingSongs.get(currentPlayingPos);
+        return mCurrentPlayingSongs.get(currentPlayingPos);
     }
 
     public ArrayList<Song> getCurrentPlayingSongs() {
-        return currentPlayingSongs;
+        return mCurrentPlayingSongs;
     }
 
     public void setCurrentPlayingSong(ArrayList<Song> currentPlayingSongs) {
-        this.currentPlayingSongs.clear();
-        this.currentPlayingSongs = currentPlayingSongs;
+        this.mCurrentPlayingSongs.clear();
+        this.mCurrentPlayingSongs = currentPlayingSongs;
     }
 
     public Song getCurrentPlayingSong() {
-        if (currentPlayingSongs.size() == 0) {
+        if (mCurrentPlayingSongs.size() == 0) {
             return null;
         }
-        return currentPlayingSongs.get(currentPlayingPos);
+        return mCurrentPlayingSongs.get(currentPlayingPos);
     }
 
     public Song getSongFromId(long id) {
-        for (Song song : currentPlayingSongs) {
-            if (song.getSongId() == id) {
-                return song;
+        for (Song Song : mCurrentPlayingSongs) {
+            if (Song.getSong_id() == id) {
+                return Song;
             }
         }
         return null;
@@ -222,11 +244,11 @@ public class FMPlayer implements MediaPlayerStateWrapper.StateListener {
     }
 
     public void addSongToQueue(Song s) {
-        currentPlayingSongs.add(s);
+        mCurrentPlayingSongs.add(s);
     }
 
-    public void addSonsListToQueue(List<Song> songList) {
-        currentPlayingSongs.addAll(songList);
+    public void addSonsListToQueue(List<Song> SongList) {
+        mCurrentPlayingSongs.addAll(SongList);
     }
 
     public void setVolumn(float left, float riht) {
@@ -244,14 +266,19 @@ public class FMPlayer implements MediaPlayerStateWrapper.StateListener {
     }
 
     public int getSongDuration() {
-        return mWrapper.getDuration();
+        int duration = mWrapper.getDuration();
+        if (duration > 0) {
+            return duration;
+        }
+        Song Song = getCurrentPlayingSong();
+        return Song.getDuration().intValue();
     }
 
     public boolean isPlaying() {
         return mWrapper.isPlaying();
     }
 
-    public void SendToTopic() {
+    private void SendToTopic() {
         if (mSubscription == null || mSubscription.isUnsubscribed()) {
             mSubscription = Observable.interval(1000, TimeUnit.MILLISECONDS)
                     .subscribe(new Action1<Long>() {
@@ -259,12 +286,10 @@ public class FMPlayer implements MediaPlayerStateWrapper.StateListener {
                         public void call(Long aLong) {
                             Intent intent = new Intent(ACTION_AUDIO_PROGRESS_CALLBACK);
                             intent.putExtra(FmPostDetailView.AUDIO_CACHE_PROGRESS, getBufferPercent());
-                            if (isPlaying()) {
-                                int position = getSongPosition();
-                                intent.putExtra(FmPostDetailView.AUDIO_PLAY_PROGRESS, position < 0 ? (int) aLong.longValue() * 1000 : position);
-                            }
+                            int position = getSongPosition();
+                            intent.putExtra(FmPostDetailView.AUDIO_PLAY_PROGRESS, position < 0 ? (int) aLong.longValue() * 1000 : position);
                             intent.putExtra(FmPostDetailView.AUDIO_PLAY_TIME, getSongDuration());
-                            context.sendBroadcast(intent);
+                            mContext.get().sendBroadcast(intent);
                         }
                     });
         }
@@ -272,7 +297,7 @@ public class FMPlayer implements MediaPlayerStateWrapper.StateListener {
     }
 
     //控制缓冲与播放进度的关系，防止坑爹服务器的流导致播放卡顿
-    void checkBuffer() {
+    private void checkBuffer() {
         if (mCheckBufferSub == null || mCheckBufferSub.isUnsubscribed()) {
             mCheckBufferSub = Observable.interval(1000, TimeUnit.MILLISECONDS)
                     .subscribe(new Action1<Long>() {
@@ -286,8 +311,11 @@ public class FMPlayer implements MediaPlayerStateWrapper.StateListener {
                                     }
 
                                 } else {
-                                    int phasePercent = (getBufferPercent() - (getSongPosition() / getSongDuration()));
-                                    if (phasePercent > 10 && mSubscription != null && !mSubscription.isUnsubscribed()) {
+                                    float position = getSongPosition();
+                                    float duration = getSongDuration();
+                                    int percent = (int) (position / duration * 100);
+                                    int phasePercent = getBufferPercent() - percent;
+                                    if (phasePercent > 20 && mSubscription != null && !mSubscription.isUnsubscribed()) {
                                         if (mWrapper.getState() == MediaPlayerStateWrapper.State.PAUSED) {
                                             mWrapper.start();
                                             sendCachingBroadcast(false);
@@ -302,10 +330,9 @@ public class FMPlayer implements MediaPlayerStateWrapper.StateListener {
                             } else {
                                 if (mWrapper.getState() == MediaPlayerStateWrapper.State.PAUSED && mSubscription != null && !mSubscription.isUnsubscribed()) {
                                     mWrapper.start();
-                                    sendCachingBroadcast(false);
-                                } else {
-                                    stopChecking();
                                 }
+                                stopChecking();
+                                sendCachingBroadcast(false);
                             }
                         }
                     });
@@ -314,19 +341,20 @@ public class FMPlayer implements MediaPlayerStateWrapper.StateListener {
     }
 
     private void sendCachingBroadcast(boolean isCaching) {
+        isBuffing = isCaching;
         Intent intent = new Intent(AUDIO_IS_CACHING);
         intent.putExtra("Caching", isCaching);
-        context.sendBroadcast(intent);
+        mContext.get().sendBroadcast(intent);
     }
 
 
-    void stopPushing() {
+    private void stopPushing() {
         if (mSubscription != null && !mSubscription.isUnsubscribed()) {
             mSubscription.unsubscribe();
         }
     }
 
-    void stopChecking() {
+    private void stopChecking() {
         if (mCheckBufferSub != null && !mCheckBufferSub.isUnsubscribed()) {
             sendCachingBroadcast(false);
             mCheckBufferSub.unsubscribe();
@@ -340,6 +368,7 @@ public class FMPlayer implements MediaPlayerStateWrapper.StateListener {
     @Override
     public void onPreParing() {
         SendToTopic();
+        sendCachingBroadcast(true);
     }
 
     @Override
@@ -349,31 +378,28 @@ public class FMPlayer implements MediaPlayerStateWrapper.StateListener {
 
     @Override
     public void onPaused() {
-
     }
 
     @Override
     public void onStopped() {
-        mPlayerCallBack.updatePlayerAndNotification(getCurrentPlayingSong(), false);
     }
 
     @Override
     public void onCompleted() {
         try {
-            stopPushing();
             playNextSong(getCurrentPlayingPos() + 1, true);
         } catch (IOException e) {
             e.printStackTrace();
-            Toast.makeText(context, "播放音乐出错",
+            Toast.makeText(mContext.get(), "播放音乐出错",
                     Toast.LENGTH_SHORT).show();
         }
     }
 
+
     @Override
     public void onError() {
-        mPlayerCallBack.updatePlayerAndNotification(getCurrentPlayingSong(), false);
-        stopPushing();
-        resetState();
+        release();
+        mWrapper = new MediaPlayerStateWrapper(this);
     }
 
     @Override
@@ -381,8 +407,17 @@ public class FMPlayer implements MediaPlayerStateWrapper.StateListener {
         mPlayerCallBack.updatePlayerAndNotification(getCurrentPlayingSong(), false);
     }
 
+    public void release() {
+        resetState();
+        mWrapper.release();
+        mWrapper = null;
+    }
 
     interface PlayerCallBack {
-        void updatePlayerAndNotification(Song song, boolean isPlaying);
+        void updatePlayerAndNotification(Song Song, boolean isPlaying);
+
+        String getProxyUrl(long id);
+
+        void stopCurrentConnection();
     }
 }
