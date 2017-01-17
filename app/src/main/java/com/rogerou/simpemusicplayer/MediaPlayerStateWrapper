@@ -15,7 +15,7 @@ import java.util.EnumSet;
 /**
  * Created by Seven on 2016/11/10
  * A wrapper class for {@link MediaPlayer}.
- * use in  {@link FMPlayer}
+ * use in  {@link PlayerController}
  * <p>
  * 一个封装好MediaPlayer状态的类
  */
